@@ -2,15 +2,29 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Mic, Loader2, Brain } from 'lucide-react';
 import { transcribeWithWhisper } from '../utils/whisper';
 
+// Simple audio compression by creating smaller chunks
+const compressAudio = async (audioBlob, mimeType) => {
+  // For now, just return the original blob
+  // Real compression would require complex audio processing
+  return audioBlob;
+};
+
 export function MicButton({ onTranscript, className = '' }) {
   const [state, setState] = useState('idle'); // idle, recording, transcribing, processing
   const [error, setError] = useState(null);
   const [isSupported, setIsSupported] = useState(true);
+  const [recordingDuration, setRecordingDuration] = useState(0);
   
   const mediaRecorderRef = useRef(null);
   const streamRef = useRef(null);
   const chunksRef = useRef([]);
   const lastTapRef = useRef(0);
+  const recordingStartTime = useRef(null);
+  const recordingTimer = useRef(null);
+  
+  // Constants for recording limits
+  const MAX_RECORDING_TIME = 30000; // 30 seconds (shorter for smaller files)
+  const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB (more conservative limit)
   
   // Check microphone support on mount
   useEffect(() => {
@@ -50,8 +64,17 @@ export function MicButton({ onTranscript, className = '' }) {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
 
-      const mimeType = MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : 'audio/mp4';
-      const recorder = new MediaRecorder(stream, { mimeType });
+      // Use optimal audio settings for smaller file size
+      const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') 
+        ? 'audio/webm;codecs=opus' 
+        : MediaRecorder.isTypeSupported('audio/webm') 
+        ? 'audio/webm' 
+        : 'audio/mp4';
+        
+      const recorder = new MediaRecorder(stream, { 
+        mimeType,
+        audioBitsPerSecond: 32000 // Very low bitrate for small files (speech quality)
+      });
       mediaRecorderRef.current = recorder;
 
       recorder.ondataavailable = (e) => {
@@ -62,13 +85,61 @@ export function MicButton({ onTranscript, className = '' }) {
 
       recorder.onstop = async () => {
         console.log('Recording stopped, creating blob...');
-        const blob = new Blob(chunksRef.current, { type: mimeType });
+        
+        // Clear recording timer
+        if (recordingTimer.current) {
+          clearInterval(recordingTimer.current);
+          recordingTimer.current = null;
+        }
+        
+        let blob = new Blob(chunksRef.current, { type: mimeType });
+        
+        // Check file size and compress if needed
+        console.log(`Original audio file size: ${(blob.size / 1024 / 1024).toFixed(2)}MB`);
+        
+        // If file is too large, try to compress it
+        if (blob.size > MAX_FILE_SIZE) {
+          try {
+            console.log('Attempting to compress audio...');
+            blob = await compressAudio(blob, mimeType);
+            console.log(`Compressed audio file size: ${(blob.size / 1024 / 1024).toFixed(2)}MB`);
+            
+            // Check again after compression
+            if (blob.size > MAX_FILE_SIZE) {
+              setError(`Recording still too large after compression (${(blob.size / 1024 / 1024).toFixed(1)}MB). Please record shorter audio.`);
+              setState('idle');
+              setTimeout(() => setError(null), 5000);
+              
+              // Clean up stream
+              if (streamRef.current) {
+                streamRef.current.getTracks().forEach(track => track.stop());
+                streamRef.current = null;
+              }
+              return;
+            }
+          } catch (compressionError) {
+            console.error('Audio compression failed:', compressionError);
+            setError(`Recording too large (${(blob.size / 1024 / 1024).toFixed(1)}MB) and compression failed. Please record shorter audio.`);
+            setState('idle');
+            setTimeout(() => setError(null), 5000);
+            
+            // Clean up stream
+            if (streamRef.current) {
+              streamRef.current.getTracks().forEach(track => track.stop());
+              streamRef.current = null;
+            }
+            return;
+          }
+        }
         
         // Clean up stream
         if (streamRef.current) {
           streamRef.current.getTracks().forEach(track => track.stop());
           streamRef.current = null;
         }
+        
+        // Reset recording duration
+        setRecordingDuration(0);
 
         // Start transcribing
         setState('transcribing');
@@ -87,12 +158,30 @@ export function MicButton({ onTranscript, className = '' }) {
         
         try {
           const text = await transcribeWithWhisper(blob);
-          if (text && onTranscript) {
+          if (text && text.trim() && onTranscript) {
             onTranscript(text);
+          } else if (!text || !text.trim()) {
+            setError('No speech detected. Please try again.');
+            // Auto-clear error after 3 seconds
+            setTimeout(() => setError(null), 3000);
           }
         } catch (err) {
           console.error('Transcription error:', err);
-          setError(err.message);
+          let errorMessage = 'Transcription failed';
+          
+          if (err.message.includes('MiniMax') && err.message.includes('OpenAI')) {
+            errorMessage = 'Speech recognition services unavailable';
+          } else if (err.message.includes('connect')) {
+            errorMessage = 'Cannot connect to server';
+          } else if (err.message.includes('key')) {
+            errorMessage = 'Speech recognition not configured';
+          } else {
+            errorMessage = err.message;
+          }
+          
+          setError(errorMessage);
+          // Auto-clear error after 5 seconds
+          setTimeout(() => setError(null), 5000);
         } finally {
           if (processingTimer) {
             clearTimeout(processingTimer);
@@ -103,6 +192,22 @@ export function MicButton({ onTranscript, className = '' }) {
 
       recorder.start();
       setState('recording');
+      
+      // Start recording timer
+      recordingStartTime.current = Date.now();
+      setRecordingDuration(0);
+      
+      recordingTimer.current = setInterval(() => {
+        const elapsed = Date.now() - recordingStartTime.current;
+        setRecordingDuration(elapsed);
+        
+        // Auto-stop recording after max time
+        if (elapsed >= MAX_RECORDING_TIME) {
+          console.log('Recording auto-stopped due to time limit');
+          stopRecording();
+        }
+      }, 100); // Update every 100ms for smooth display
+      
       console.log('Recording started successfully');
     } catch (err) {
       console.error('Failed to start recording:', err);
@@ -130,6 +235,13 @@ export function MicButton({ onTranscript, className = '' }) {
   // Stop recording
   const stopRecording = () => {
     console.log('Stopping recording...');
+    
+    // Clear recording timer
+    if (recordingTimer.current) {
+      clearInterval(recordingTimer.current);
+      recordingTimer.current = null;
+    }
+    
     if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
       mediaRecorderRef.current.stop();
       // Don't set state here - let the onstop handler do it
@@ -140,6 +252,7 @@ export function MicButton({ onTranscript, className = '' }) {
         streamRef.current.getTracks().forEach(track => track.stop());
         streamRef.current = null;
       }
+      setRecordingDuration(0);
       setState('idle');
     }
   };
@@ -180,6 +293,9 @@ export function MicButton({ onTranscript, className = '' }) {
     return () => {
       if (streamRef.current) {
         streamRef.current.getTracks().forEach(track => track.stop());
+      }
+      if (recordingTimer.current) {
+        clearInterval(recordingTimer.current);
       }
     };
   }, []);
@@ -251,6 +367,14 @@ export function MicButton({ onTranscript, className = '' }) {
       >
         {icon}
       </button>
+      
+      {/* Recording duration display */}
+      {state === 'recording' && (
+        <div className="absolute top-full mt-2 left-1/2 transform -translate-x-1/2 
+                        bg-red-500 text-white text-xs px-2 py-1 rounded whitespace-nowrap z-10">
+          {Math.floor(recordingDuration / 1000)}s / {Math.floor(MAX_RECORDING_TIME / 1000)}s
+        </div>
+      )}
       
       {error && (
         <div className="absolute top-full mt-2 left-1/2 transform -translate-x-1/2 

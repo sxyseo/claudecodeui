@@ -2,9 +2,12 @@
 export const authenticatedFetch = (url, options = {}) => {
   const token = localStorage.getItem('auth-token');
   
-  const defaultHeaders = {
-    'Content-Type': 'application/json',
-  };
+  const defaultHeaders = {};
+  
+  // Only set Content-Type for non-FormData requests
+  if (!options.body || !(options.body instanceof FormData)) {
+    defaultHeaders['Content-Type'] = 'application/json';
+  }
   
   if (token) {
     defaultHeaders['Authorization'] = `Bearer ${token}`;
@@ -76,6 +79,5 @@ export const api = {
     authenticatedFetch('/api/transcribe', {
       method: 'POST',
       body: formData,
-      headers: {}, // Let browser set Content-Type for FormData
     }),
 };

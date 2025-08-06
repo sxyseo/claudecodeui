@@ -2532,8 +2532,8 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
               </svg>
             </button>
             
-            {/* Mic button - HIDDEN */}
-            <div className="absolute right-16 sm:right-16 top-1/2 transform -translate-y-1/2" style={{ display: 'none' }}>
+            {/* Voice input button */}
+            <div className="absolute right-16 sm:right-16 top-1/2 transform -translate-y-1/2">
               <MicButton 
                 onTranscript={handleTranscript}
                 className="w-10 h-10 sm:w-10 sm:h-10"

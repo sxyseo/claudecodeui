@@ -434,6 +434,7 @@ function Shell({ selectedProject, selectedSession, isActive }) {
               const initPayload = {
                 type: 'init',
                 projectPath: selectedProject.fullPath || selectedProject.path,
+                projectName: selectedProject.name,
                 sessionId: selectedSession?.id,
                 hasSession: !!selectedSession,
                 cols: terminal.current.cols,

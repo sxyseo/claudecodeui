@@ -43,6 +43,7 @@ import authRoutes from './routes/auth.js';
 import mcpRoutes from './routes/mcp.js';
 import { initializeDatabase } from './database/db.js';
 import { validateApiKey, authenticateToken, authenticateWebSocket } from './middleware/auth.js';
+import previewService from './services/preview.js';
 
 // File system watcher for projects folder
 let projectsWatcher = null;
@@ -161,7 +162,8 @@ const wss = new WebSocketServer({
 });
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 // Optional API key validation (if configured)
 app.use('/api', validateApiKey);
@@ -174,6 +176,199 @@ app.use('/api/git', authenticateToken, gitRoutes);
 
 // MCP API Routes (protected)
 app.use('/api/mcp', authenticateToken, mcpRoutes);
+
+// Preview API Routes (protected)
+app.get('/api/preview/apps', authenticateToken, (req, res) => {
+  try {
+    console.log('📱 Preview apps API called by user:', req.user?.username);
+    const apps = previewService.getAllApps();
+    console.log('📱 Returning', apps.length, 'preview apps');
+    res.json(apps);
+  } catch (error) {
+    console.error('Error getting preview apps:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/preview/scan/:projectName', authenticateToken, async (req, res) => {
+  try {
+    const { projectName } = req.params;
+    const projectPath = await extractProjectDirectory(projectName);
+    const detectedApps = await previewService.scanForRunningApps(projectPath);
+    res.json({ 
+      projectName,
+      projectPath,
+      detectedApps 
+    });
+  } catch (error) {
+    console.error('Error scanning for apps:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/preview/register', authenticateToken, async (req, res) => {
+  try {
+    const { projectName, port, framework } = req.body;
+    
+    if (!projectName || !port) {
+      return res.status(400).json({ error: 'Project name and port are required' });
+    }
+    
+    const projectPath = await extractProjectDirectory(projectName);
+    const appInfo = await previewService.registerApp(projectName, port, {
+      framework,
+      projectPath,
+      detected: false
+    });
+    
+    res.json({ success: true, app: appInfo });
+  } catch (error) {
+    console.error('Error registering preview app:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete('/api/preview/apps/:projectName', authenticateToken, (req, res) => {
+  try {
+    const { projectName } = req.params;
+    previewService.unregisterApp(projectName);
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error unregistering preview app:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Preview proxy route - must be before the catch-all route
+app.use('/preview/:projectName/*', authenticateToken, (req, res, next) => {
+  const { projectName } = req.params;
+  const appInfo = previewService.getApp(projectName);
+  
+  if (!appInfo) {
+    // Return HTML error page instead of JSON
+    return res.status(404).send(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>Preview Not Found</title>
+        <style>
+          body { 
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #f3f4f6; 
+            color: #374151; 
+            margin: 0; 
+            padding: 40px 20px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+          }
+          .container { 
+            text-align: center; 
+            background: white;
+            padding: 40px;
+            border-radius: 8px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+            max-width: 500px;
+          }
+          .icon { font-size: 48px; margin-bottom: 20px; }
+          h1 { color: #dc2626; margin-bottom: 16px; }
+          p { margin-bottom: 12px; line-height: 1.5; }
+          .apps { 
+            background: #f9fafb; 
+            padding: 16px; 
+            border-radius: 6px; 
+            margin-top: 20px;
+            font-size: 14px;
+          }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="icon">📱</div>
+          <h1>Preview App Not Found</h1>
+          <p>The preview app "<strong>${projectName}</strong>" is not registered.</p>
+          <p>Start your development server and it should be auto-detected, or register it manually in the preview panel.</p>
+          ${previewService.getAllApps().length > 0 ? `
+            <div class="apps">
+              <strong>Available apps:</strong><br>
+              ${previewService.getAllApps().map(app => app.projectName).join(', ')}
+            </div>
+          ` : ''}
+        </div>
+      </body>
+      </html>
+    `);
+  }
+  
+  if (appInfo.status !== 'running') {
+    // Return HTML error page instead of JSON
+    return res.status(503).send(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>Preview App Not Running</title>
+        <style>
+          body { 
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #f3f4f6; 
+            color: #374151; 
+            margin: 0; 
+            padding: 40px 20px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+          }
+          .container { 
+            text-align: center; 
+            background: white;
+            padding: 40px;
+            border-radius: 8px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+            max-width: 500px;
+          }
+          .icon { font-size: 48px; margin-bottom: 20px; }
+          h1 { color: #dc2626; margin-bottom: 16px; }
+          p { margin-bottom: 12px; line-height: 1.5; }
+          .status { 
+            background: #fef2f2; 
+            color: #dc2626;
+            padding: 12px; 
+            border-radius: 6px; 
+            margin-top: 20px;
+            font-weight: 500;
+          }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="icon">⏸️</div>
+          <h1>Preview App Not Running</h1>
+          <p>The preview app "<strong>${projectName}</strong>" is registered but not currently running.</p>
+          <p>Start your development server on port <strong>${appInfo.port}</strong> to view the preview.</p>
+          <div class="status">
+            Status: ${appInfo.status} • Port: ${appInfo.port}
+          </div>
+        </div>
+      </body>
+      </html>
+    `);
+  }
+  
+  // Create and use proxy
+  const proxy = previewService.createProxy(appInfo.port, { 
+    projectName,
+    proxyOptions: {
+      // Preserve original path after removing preview prefix
+      pathRewrite: {
+        [`^/preview/${projectName}`]: '',
+      }
+    }
+  });
+  
+  proxy(req, res, next);
+});
 
 // Static files served after API routes
 app.use(express.static(path.join(__dirname, '../dist')));
@@ -498,6 +693,7 @@ function handleShellConnection(ws) {
       if (data.type === 'init') {
         // Initialize shell with project path and session info
         const projectPath = data.projectPath || process.cwd();
+        const projectName = data.projectName || path.basename(projectPath);
         const sessionId = data.sessionId;
         const hasSession = data.hasSession;
         
@@ -544,6 +740,10 @@ function handleShellConnection(ws) {
             }
           });
           
+          // Store project info for pattern matching
+          shellProcess.projectPath = projectPath;
+          shellProcess.projectName = projectName;
+          
           console.log('🟢 Shell process started with PTY, PID:', shellProcess.pid);
           
           // Handle data output
@@ -551,8 +751,8 @@ function handleShellConnection(ws) {
             if (ws.readyState === ws.OPEN) {
               let outputData = data;
               
-              // Check for various URL opening patterns
-              const patterns = [
+              // Check for various URL opening patterns and development server start patterns
+              const urlPatterns = [
                 // Direct browser opening commands
                 /(?:xdg-open|open|start)\s+(https?:\/\/[^\s\x1b\x07]+)/g,
                 // BROWSER environment variable override
@@ -564,8 +764,28 @@ function handleShellConnection(ws) {
                 /View at:\s*(https?:\/\/[^\s\x1b\x07]+)/gi,
                 /Browse to:\s*(https?:\/\/[^\s\x1b\x07]+)/gi
               ];
+
+              // Development server patterns to detect running applications
+              const devServerPatterns = [
+                // Vite
+                /Local:\s+https?:\/\/localhost:(\d+)/gi,
+                // Create React App / Webpack Dev Server
+                /webpack compiled|Local:\s+https?:\/\/localhost:(\d+)|server running.*?(\d+)/gi,
+                // Next.js
+                /ready - started server on.*?(\d+)|Local:\s+https?:\/\/localhost:(\d+)/gi,
+                // Express/Node.js
+                /server (?:is )?(?:listening|running).*?(?:port )?(\d+)|listening on.*?(\d+)/gi,
+                // Angular
+                /Local:\s+https?:\/\/localhost:(\d+)|Angular Live Development Server.*?(\d+)/gi,
+                // Vue CLI
+                /App running at.*?localhost:(\d+)|Local:\s+https?:\/\/localhost:(\d+)/gi,
+                // General patterns
+                /https?:\/\/localhost:(\d+)/gi,
+                /(?:port|PORT)\s*:?\s*(\d+)/gi
+              ];
               
-              patterns.forEach(pattern => {
+              // Process URL patterns
+              urlPatterns.forEach(pattern => {
                 let match;
                 while ((match = pattern.exec(data)) !== null) {
                   const url = match[1];
@@ -580,6 +800,46 @@ function handleShellConnection(ws) {
                   // Replace the OPEN_URL pattern with a user-friendly message
                   if (pattern.source.includes('OPEN_URL')) {
                     outputData = outputData.replace(match[0], `🌐 Opening in browser: ${url}`);
+                  }
+                }
+              });
+
+              // Process development server patterns to auto-register preview apps
+              const currentProjectName = shellProcess.projectName || 'unknown';
+              const currentProjectPath = shellProcess.projectPath;
+              devServerPatterns.forEach(pattern => {
+                let match;
+                while ((match = pattern.exec(data)) !== null) {
+                  // Extract port number (could be in match[1] or match[2] depending on pattern)
+                  const port = parseInt(match[1] || match[2]);
+                  
+                  if (port && port > 1000 && port < 65536) {
+                    console.log(`📱 Detected development server on port ${port} for project ${currentProjectName}`);
+                    
+                    // Auto-register the preview app
+                    setTimeout(async () => {
+                      try {
+                        // Check if app is already registered
+                        if (!previewService.getApp(currentProjectName)) {
+                          await previewService.registerApp(currentProjectName, port, {
+                            framework: previewService.guessFramework(port),
+                            projectPath: currentProjectPath,
+                            detected: true
+                          });
+
+                          // Notify client about new preview app
+                          ws.send(JSON.stringify({
+                            type: 'preview_app_detected',
+                            projectName: currentProjectName,
+                            port,
+                            url: `http://localhost:${port}`,
+                            previewUrl: `/preview/${currentProjectName}/`
+                          }));
+                        }
+                      } catch (error) {
+                        console.error('Error auto-registering preview app:', error);
+                      }
+                    }, 1000); // Delay to ensure server is fully started
                   }
                 }
               });
@@ -653,56 +913,202 @@ function handleShellConnection(ws) {
     console.error('❌ Shell WebSocket error:', error);
   });
 }
+// Audio transcription with MiniMax ASR
+async function transcribeWithMiniMax(audioBuffer, filename, mimetype) {
+  const MINIMAX_API_KEY = process.env.MINIMAX_API_KEY;
+  
+  if (!MINIMAX_API_KEY) {
+    throw new Error('MiniMax API key not configured. Please set MINIMAX_API_KEY environment variable.');
+  }
+  
+  // MiniMax ASR endpoint - try different possible endpoints
+  const endpoints = [
+    'https://api.minimaxi.chat/v1/audio/speech-to-text',
+    'https://api.minimaxi.chat/v1/audio/transcriptions', 
+    'https://api.minimaxi.chat/v1/transcriptions',
+    'https://api.minimaxi.com/v1/audio/transcriptions',
+    'https://api.minimaxi.com/v1/audio/speech-to-text'
+  ];
+  
+  for (const endpoint of endpoints) {
+    try {
+      const FormData = (await import('form-data')).default;
+      const formData = new FormData();
+      
+      // MiniMax expects 'file' field with audio data
+      formData.append('file', audioBuffer, {
+        filename: filename,
+        contentType: mimetype
+      });
+      
+      // MiniMax API parameters based on their documentation
+      formData.append('model', 'speech-01');
+      formData.append('language', 'auto');
+      formData.append('response_format', 'json');
+      
+      console.log(`🎤 Trying MiniMax endpoint: ${endpoint}`);
+      console.log(`📄 File: ${filename}, Type: ${mimetype}, Size: ${audioBuffer.length} bytes`);
+      
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${MINIMAX_API_KEY}`,
+          ...formData.getHeaders()
+        },
+        body: formData
+      });
+      
+      console.log(`📡 MiniMax response status: ${response.status}`);
+      
+      if (response.ok) {
+        const data = await response.json();
+        console.log('✅ MiniMax ASR successful');
+        console.log('📝 MiniMax response data:', JSON.stringify(data, null, 2));
+        
+        // MiniMax response format may vary, try different fields
+        const text = data.text || data.transcript || data.result || data.output?.text || '';
+        
+        if (!text) {
+          console.warn('⚠️ MiniMax returned empty text, full response:', data);
+        }
+        
+        return text;
+      } else {
+        const errorText = await response.text().catch(() => '');
+        console.error(`❌ MiniMax endpoint ${endpoint} failed: ${response.status} ${response.statusText}`);
+        console.error(`❌ Error details: ${errorText}`);
+        
+        // Try to parse error JSON
+        try {
+          const errorData = JSON.parse(errorText);
+          console.error('❌ Parsed error data:', errorData);
+        } catch (e) {
+          console.error('❌ Could not parse error as JSON');
+        }
+        
+        // Continue to next endpoint
+        continue;
+      }
+    } catch (error) {
+      console.error(`❌ MiniMax endpoint ${endpoint} error:`, error.message);
+      continue;
+    }
+  }
+  
+  // If we get here, all endpoints failed
+  throw new Error('All MiniMax endpoints failed - API might not support speech-to-text or endpoints have changed');
+}
+
+// Fallback to OpenAI Whisper
+async function transcribeWithOpenAI(audioBuffer, filename, mimetype) {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) {
+    throw new Error('OpenAI API key not configured');
+  }
+  
+  const FormData = (await import('form-data')).default;
+  const formData = new FormData();
+  formData.append('file', audioBuffer, {
+    filename: filename,
+    contentType: mimetype
+  });
+  formData.append('model', 'whisper-1');
+  formData.append('response_format', 'json');
+  formData.append('language', 'zh');
+  
+  const response = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${apiKey}`,
+      ...formData.getHeaders()
+    },
+    body: formData
+  });
+  
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({}));
+    throw new Error(errorData.error?.message || `OpenAI Whisper API error: ${response.status}`);
+  }
+  
+  const data = await response.json();
+  return data.text || '';
+}
+
 // Audio transcription endpoint
 app.post('/api/transcribe', authenticateToken, async (req, res) => {
   try {
     const multer = (await import('multer')).default;
-    const upload = multer({ storage: multer.memoryStorage() });
+    const upload = multer({ 
+      storage: multer.memoryStorage(),
+      limits: {
+        fileSize: 10 * 1024 * 1024, // 10MB limit (more conservative)
+        fieldSize: 10 * 1024 * 1024
+      }
+    });
     
     // Handle multipart form data
     upload.single('audio')(req, res, async (err) => {
       if (err) {
-        return res.status(400).json({ error: 'Failed to process audio file' });
+        if (err.code === 'LIMIT_FILE_SIZE') {
+          console.error('File too large:', err);
+          return res.status(413).json({ 
+            error: 'Audio file too large. Please record shorter audio (max 10MB).' 
+          });
+        }
+        console.error('Multer error:', err);
+        return res.status(400).json({ error: 'Failed to process audio file: ' + err.message });
       }
       
+      console.log('📁 Transcribe request received');
+      console.log('📂 File info:', req.file ? {
+        fieldname: req.file.fieldname,
+        originalname: req.file.originalname,
+        mimetype: req.file.mimetype,
+        size: req.file.size
+      } : 'No file');
+      console.log('📋 Body:', req.body);
+      
       if (!req.file) {
+        console.error('❌ No audio file provided in request');
         return res.status(400).json({ error: 'No audio file provided' });
       }
       
-      const apiKey = process.env.OPENAI_API_KEY;
-      if (!apiKey) {
-        return res.status(500).json({ error: 'OpenAI API key not configured. Please set OPENAI_API_KEY in server environment.' });
-      }
-      
       try {
-        // Create form data for OpenAI
-        const FormData = (await import('form-data')).default;
-        const formData = new FormData();
-        formData.append('file', req.file.buffer, {
-          filename: req.file.originalname,
-          contentType: req.file.mimetype
-        });
-        formData.append('model', 'whisper-1');
-        formData.append('response_format', 'json');
-        formData.append('language', 'en');
+        console.log('🎤 Starting audio transcription...');
+        let transcribedText = '';
         
-        // Make request to OpenAI
-        const response = await fetch('https://api.openai.com/v1/audio/transcriptions', {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${apiKey}`,
-            ...formData.getHeaders()
-          },
-          body: formData
-        });
-        
-        if (!response.ok) {
-          const errorData = await response.json().catch(() => ({}));
-          throw new Error(errorData.error?.message || `Whisper API error: ${response.status}`);
+        // Try OpenAI Whisper first (more reliable)
+        try {
+          transcribedText = await transcribeWithOpenAI(
+            req.file.buffer,
+            req.file.originalname,
+            req.file.mimetype
+          );
+          console.log('✅ OpenAI Whisper transcription successful');
+        } catch (openaiError) {
+          console.log('❌ OpenAI transcription failed:', openaiError.message);
+          
+          // Fallback to MiniMax (if configured)
+          if (process.env.MINIMAX_API_KEY) {
+            try {
+              transcribedText = await transcribeWithMiniMax(
+                req.file.buffer,
+                req.file.originalname,
+                req.file.mimetype
+              );
+              console.log('✅ MiniMax transcription successful');
+            } catch (minimaxError) {
+              console.log('❌ MiniMax transcription also failed:', minimaxError.message);
+              return res.status(500).json({ 
+                error: `Both OpenAI and MiniMax transcription failed. OpenAI: ${openaiError.message}, MiniMax: ${minimaxError.message}` 
+              });
+            }
+          } else {
+            return res.status(500).json({ 
+              error: `OpenAI transcription failed: ${openaiError.message}. MiniMax not configured as fallback.` 
+            });
+          }
         }
-        
-        const data = await response.json();
-        let transcribedText = data.text || '';
         
         // Check if enhancement mode is enabled
         const mode = req.body.mode || 'default';
@@ -992,6 +1398,9 @@ async function startServer() {
       
       // Start watching the projects folder for changes
       await setupProjectsWatcher(); // Re-enabled with better-sqlite3
+      
+      // Start preview service monitoring
+      previewService.startMonitoring();
     });
   } catch (error) {
     console.error('❌ Failed to start server:', error);
